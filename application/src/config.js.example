@@ -1,0 +1,16 @@
+const config = {
+  Auth: {
+    identityPoolId: "",
+    region: "",
+    userPoolId: "",
+    userPoolWebClientId: ""
+  },
+  dataBucket: "",
+  region: "",
+  iotEndpoint: "",
+  iotPolicyName: "",
+  sqsUrl: "",
+  counterTable: ""
+};
+
+export default config;

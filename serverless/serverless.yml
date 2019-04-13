@@ -1,0 +1,398 @@
+service:
+  name: ${file(./config.yml):serviceName}
+
+# Add the serverless-webpack plugin
+plugins:
+  - serverless-webpack
+  - serverless-pseudo-parameters
+provider:
+  name: aws
+  runtime: nodejs8.10
+  profile: ${self:custom.profiles}
+  region: ap-northeast-1
+
+  iamRoleStatements:
+    - Effect: Allow
+      Action: dynamodb:UpdateItem
+      Resource: !GetAtt CounterTable.Arn
+    - Effect: Allow
+      Action:
+        - iot:Publish
+        - firehose:*
+      Resource: "*"
+
+  logRetentionInDays: 30
+
+custom:
+  defaultStage: dev
+  profiles: uretayo
+  primaryKey: "user_sub"
+  sortKey: "book_id"
+  countCol: "counter"
+  iotEndpoint: ${file(./config.yml):iotEndpoint}
+  ddbReadCapacityUnits: 5
+  ddbWriteCapacityUnits: 5
+
+functions:
+  autoConfirm:
+    handler: src/autoConfirm.handler
+    events:
+      - cognitoUserPool:
+          pool: MyUserPool
+          trigger: PreSignUp
+  computeUreta:
+    handler: src/uretayoCompute.handler
+    events:
+      - sqs:
+          arn: !GetAtt [UretaQueue, Arn]
+    environment:
+      TABLE_NAME: !Ref CounterTable
+      PRIMARY_KEY: ${self:custom.primaryKey}
+      SORT_KEY: ${self:custom.sortKey}
+      COUNTER_COL: ${self:custom.countCol}
+      IOT_ENDPOINT: ${self:custom.iotEndpoint}
+      REGION: ${self:provider.region}
+      USER_POOL_ID: !Ref CognitoUserPoolMyUserPool
+      APP_CLIENT_ID: !Ref CognitoAppClient
+      DELIVERY_STREAMNAME: !Ref LogStream
+
+resources:
+  Resources:
+    DataBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        CorsConfiguration:
+          CorsRules:
+            - AllowedOrigins:
+                - "*"
+              MaxAge: 3000
+              AllowedHeaders:
+                - "*"
+              AllowedMethods:
+                - "GET"
+                - "PUT"
+                - "HEAD"
+                - "POST"
+                - "DELETE"
+        Tags:
+          - Key: proj
+            Value: ${self:service.name}
+
+    LogBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        Tags:
+          - Key: proj
+            Value: ${self:service.name}
+    AssetBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        Tags:
+          - Key: proj
+            Value: ${self:service.name}
+    AssetBucketPolicy:
+        Type: AWS::S3::BucketPolicy
+        Properties:
+          Bucket: !Ref AssetBucket
+          PolicyDocument:
+            Statement:
+              - Action: s3:GetObject
+                Effect: Allow
+                Resource: "arn:aws:s3:::#{AssetBucket}/*"
+                Principal:
+                  AWS: "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity #{CDNOAI}"
+
+    CDN:
+      Type: AWS::CloudFront::Distribution
+      Properties:
+        DistributionConfig:
+          DefaultCacheBehavior:
+            DefaultTTL: 5
+            ForwardedValues:
+              QueryString: false
+            TargetOriginId: asset
+            ViewerProtocolPolicy: redirect-to-https
+          DefaultRootObject: index.html
+          Enabled: true
+          HttpVersion: http2
+          Origins:
+            - DomainName: !GetAtt AssetBucket.DomainName
+              Id: asset
+              S3OriginConfig:
+                OriginAccessIdentity: "origin-access-identity/cloudfront/#{CDNOAI}"
+          CustomErrorResponses:
+            - ErrorCode: 403
+              ResponseCode: 200
+              ResponsePagePath: /index.html
+            - ErrorCode: 404
+              ResponseCode: 200
+              ResponsePagePath: /index.html
+        Tags:
+          - Key: proj
+            Value: ${self:service.name}
+    CDNOAI:
+      Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+      Properties:
+        CloudFrontOriginAccessIdentityConfig:
+          Comment: ${self:service.name}
+
+    LogStream:
+      Type: AWS::KinesisFirehose::DeliveryStream
+      Properties:
+        S3DestinationConfiguration:
+          BucketARN: !GetAtt LogBucket.Arn
+          BufferingHints:
+            IntervalInSeconds: 60
+            SizeInMBs: 1
+          # CompressionFormat: GZIP
+          CompressionFormat: UNCOMPRESSED
+          Prefix: transaction/
+          RoleARN: !GetAtt FirehoseRole.Arn
+
+    FirehoseRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: firehose.amazonaws.com
+              Action: sts:AssumeRole
+              Condition:
+                StringEquals:
+                  "sts:ExternalId": "#{AWS::AccountId}"
+        Policies:
+          - PolicyName: firehose
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:AbortMultipartUpload
+                    - s3:GetBucketLocation
+                    - s3:GetObject
+                    - s3:ListBucket
+                    - s3:ListBucketMultipartUploads
+                    - s3:PutObject
+                  Resource:
+                    - "arn:aws:s3:::#{LogBucket}"
+                    - "arn:aws:s3:::#{LogBucket}/*"
+
+    CounterTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: ${self:custom.primaryKey}
+            AttributeType: "S"
+          - AttributeName: ${self:custom.sortKey}
+            AttributeType: "S"
+        KeySchema:
+          - AttributeName: ${self:custom.primaryKey}
+            KeyType: "HASH"
+          - AttributeName: ${self:custom.sortKey}
+            KeyType: "RANGE"
+        BillingMode: PROVISIONED
+        ProvisionedThroughput:
+          ReadCapacityUnits: ${self:custom.ddbReadCapacityUnits}
+          WriteCapacityUnits: ${self:custom.ddbWriteCapacityUnits}
+        Tags:
+          - Key: proj
+            Value: ${self:service.name}
+
+    CognitoIdPool:
+      Type: AWS::Cognito::IdentityPool
+      Properties:
+        AllowUnauthenticatedIdentities: true
+        CognitoIdentityProviders:
+          - ClientId: !Ref CognitoAppClient
+            ProviderName: !GetAtt CognitoUserPoolMyUserPool.ProviderName
+    CognitoUserPoolMyUserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        UserPoolName: !Ref AWS::StackName
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 8
+            RequireLowercase: false
+            RequireNumbers: false
+            RequireSymbols: false
+            RequireUppercase: false
+    CognitoAppClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        UserPoolId: !Ref CognitoUserPoolMyUserPool
+
+    # 未認証ユーザーのロール
+    UnauthRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Federated: cognito-identity.amazonaws.com
+              Action: sts:AssumeRoleWithWebIdentity
+              Condition:
+                StringEquals:
+                  "cognito-identity.amazonaws.com:aud": !Ref CognitoIdPool
+                ForAnyValue:StringLike:
+                  "cognito-identity.amazonaws.com:amr": "unauthenticated"
+        Policies:
+          - PolicyName: firehose
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - mobileanalytics:PutEvents
+                    - cognito-sync:*
+                    - iot:Subscribe
+                    - iot:Receive
+                    - iot:Connect
+                    - iot:ListAttachedPolicies
+                    - iot:AttachPolicy
+                  Resource: "*"
+                - Effect: "Allow"
+                  Action:
+                    - dynamodb:GetItem
+                    - dynamodb:Query
+                  Resource: !GetAtt CounterTable.Arn
+                - Effect: "Allow"
+                  Action:
+                    - s3:ListBucket
+                  Resource: "arn:aws:s3:::#{DataBucket}"
+                  Condition:
+                    StringLike:
+                      s3:prefix: "data/*"
+                - Effect: "Allow"
+                  Action:
+                    - s3:GetObject
+                  Resource: "arn:aws:s3:::#{DataBucket}/*"
+    # 認証ユーザーのロール
+    AuthRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Federated: cognito-identity.amazonaws.com
+              Action: sts:AssumeRoleWithWebIdentity
+              Condition:
+                StringEquals:
+                  "cognito-identity.amazonaws.com:aud": !Ref CognitoIdPool
+                ForAnyValue:StringLike:
+                  "cognito-identity.amazonaws.com:amr": "authenticated"
+        Policies:
+          - PolicyName: firehose
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - mobileanalytics:PutEvents
+                    - cognito-sync:*
+                    - cognito-identity:*
+                    - iot:Subscribe
+                    - iot:Receive
+                    - iot:Connect
+                    - iot:ListAttachedPolicies
+                    - iot:AttachPolicy
+                  Resource: "*"
+                - Effect: "Allow"
+                  Action:
+                    - dynamodb:GetItem
+                    - dynamodb:Query
+                  Resource: !GetAtt CounterTable.Arn
+                - Effect: "Allow"
+                  Action:
+                    - s3:ListBucket
+                  Resource: "arn:aws:s3:::#{DataBucket}"
+                  Condition:
+                    StringLike:
+                      s3:prefix: "data/*"
+                - Effect: "Allow"
+                  Action:
+                    - s3:GetObject
+                  Resource: "arn:aws:s3:::#{DataBucket}/*"
+                - Effect: "Allow"
+                  Action: sqs:SendMessage
+                  Resource: !GetAtt UretaQueue.Arn
+                - Effect: "Allow"
+                  Action:
+                    - s3:PutObject
+                    - s3:DeleteObject
+                    - s3:PutObjectAcl
+                  Resource:
+                    - !Join
+                      - ""
+                      - - arn:aws:s3:::#{DataBucket}/data/
+                        - "${cognito-identity.amazonaws.com:sub"
+                        - "}"
+                    - !Join
+                      - ""
+                      - - arn:aws:s3:::#{DataBucket}/data/
+                        - "${cognito-identity.amazonaws.com:sub"
+                        - "}/*"
+
+    CognitoAttacheRole:
+      Type: AWS::Cognito::IdentityPoolRoleAttachment
+      Properties:
+        IdentityPoolId: !Ref CognitoIdPool
+        Roles:
+          unauthenticated: !GetAtt UnauthRole.Arn
+          authenticated: !GetAtt AuthRole.Arn
+
+    # IoTの証明書にアタッチするポリシーの設定
+    IoTPolicy:
+      Type: AWS::IoT::Policy
+      Properties:
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - iot:Receive
+                - iot:Connect
+                - iot:Subscribe
+              Resource:
+                - "arn:aws:iot:${self:provider.region}:#{AWS::AccountId}:topic/uretayo/*"
+                - "arn:aws:iot:${self:provider.region}:#{AWS::AccountId}:topicfilter/uretayo/*"
+                - "arn:aws:iot:${self:provider.region}:#{AWS::AccountId}:client/*"
+
+    UretaQueue:
+      Type: AWS::SQS::Queue
+      DependsOn: UretaDeadQueue
+      Properties:
+        VisibilityTimeout: 60
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt UretaDeadQueue.Arn
+          maxReceiveCount: 3
+    UretaDeadQueue:
+      Type: AWS::SQS::Queue
+
+  Outputs:
+    ServiceUrl:
+      Value: "https://#{CDN.DomainName}/"
+      Description: "Service Url"
+    DataBucket:
+      Value: !Ref DataBucket
+      Description: "Data Bucket"
+    CognitoIdentityPoolId:
+      Value: !Ref CognitoIdPool
+      Description: "identityPoolId"
+    CognitoUserPoolId:
+      Value: !Ref CognitoUserPoolMyUserPool
+      Description: "userPoolId"
+    CognitoWebClientId:
+      Value: !Ref CognitoAppClient
+      Description: "userPoolWebClientId"
+    IoTPolicyName:
+      Value: !Ref IoTPolicy
+    SQSUrl:
+      Value: !Ref UretaQueue
+    CounterTable:
+      Value: !Ref CounterTable
