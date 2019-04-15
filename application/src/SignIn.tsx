@@ -51,6 +51,7 @@ class MySignIn extends React.Component<any> {
         password: this.state.passwd
       });
       this.props.onStateChange("signedIn");
+      this.setState({ isLoading: false});
     } catch (e) {
       this.setState({
         isLoading: false,
@@ -90,7 +91,7 @@ class MySignIn extends React.Component<any> {
           <Grid.Column>
             <Segment clearing>
               <Header as="h1" textAlign="center">
-                サークルログイン
+                サークルサインイン
               </Header>
               <Message
                 error
@@ -117,7 +118,7 @@ class MySignIn extends React.Component<any> {
                   onChange={this.handleChange}
                 />
                 <Button primary fluid type="submit" onClick={this.signIn}>
-                  ログイン
+                  サインイン
                 </Button>
                 <Divider />
                 <Container textAlign="right">

@@ -144,7 +144,7 @@ class SignUp extends React.Component<any> {
                 <Container textAlign="right">
                   <List>
                     <List.Item as="a" onClick={this.toSignIn}>
-                      サークルログインに戻る
+                      サークルサインインに戻る
                     </List.Item>
                   </List>
                 </Container>
@@ -157,7 +157,7 @@ class SignUp extends React.Component<any> {
             >
               <Modal.Header>サークル登録が完了しました</Modal.Header>
               <Modal.Content>
-                <p>ログイン画面からログインしてください</p>
+                <p>サインイン画面からサインインしてください</p>
               </Modal.Content>
               <Modal.Actions>
                 <Button primary content="閉じる" onClick={this.close} />
